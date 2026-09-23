@@ -220,6 +220,12 @@ func buildSSHConfigLines(params addHostParams, proxyCmd string) []string {
 }
 
 // findInsertPosition finds where to insert new SSH config entry.
+//
+// The new block is inserted just before the first Host stanza (case-insensitive,
+// matching SSH config semantics). Any plain comment lines immediately preceding
+// that stanza are included in the backtrack so the block lands before the
+// comments too — but "# DevPod Start/End" marker lines are never treated as
+// backtrack candidates, because they belong to the previous block.
 func findInsertPosition(config string) (int, []string, error) {
 	lineNumber := 0
 	found := false
@@ -229,13 +235,24 @@ func findInsertPosition(config string) (int, []string, error) {
 	scanner := bufio.NewScanner(strings.NewReader(config))
 	for scanner.Scan() {
 		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
 
-		if strings.HasPrefix(strings.TrimSpace(line), "Host") && !found {
+		// Case-insensitive match for "host " or exactly "host" — mirrors SSH
+		// config semantics where the keyword is case-insensitive.
+		isHostLine := strings.EqualFold(trimmed, "host") ||
+			strings.HasPrefix(strings.ToLower(trimmed), "host ")
+
+		if isHostLine && !found {
 			found = true
 			lineNumber = max(lineNumber-commentLines, 0)
 		}
 
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+		// Count consecutive plain comment lines, but do NOT count DevPod
+		// marker lines — they are part of the preceding block and must not
+		// cause the insert position to back up into it.
+		isDevPodMarker := strings.HasPrefix(trimmed, MarkerStartPrefix) ||
+			strings.HasPrefix(trimmed, MarkerEndPrefix)
+		if strings.HasPrefix(trimmed, "#") && !isDevPodMarker {
 			commentLines++
 		} else {
 			commentLines = 0

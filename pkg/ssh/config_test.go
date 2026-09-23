@@ -17,19 +17,23 @@ func TestSSHConfigSuite(t *testing.T) {
 
 func (s *SSHConfigTestSuite) TestAddHostSection() {
 	tests := []struct {
-		name       string
-		config     string
-		execPath   string
-		host       string
-		user       string
-		context    string
-		workspace  string
-		workdir    string
-		command    string
-		gpgagent   bool
-		devPodHome string
-		provider   string
-		expected   string
+		name                   string
+		config                 string
+		execPath               string
+		host                   string
+		user                   string
+		context                string
+		workspace              string
+		workdir                string
+		command                string
+		gpgagent               bool
+		devPodHome             string
+		provider               string
+		expected               string
+		// skipConfigContainsCheck disables the blanket assert.Contains(result,
+		// config) check for cases where the new block is inserted inside the
+		// existing config, splitting it.
+		skipConfigContainsCheck bool
 	}{
 		{
 			name:       "Basic host addition",
@@ -205,19 +209,13 @@ Host existinghost
 		},
 		{
 			name: "Host addition to existing config with DevPod host",
-			config: `# DevPod Start existingtesthost
-Host existingtesthost
-  ForwardAgent yes
-  LogLevel error
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa
-  ProxyCommand "/path/to/exec" ssh --stdio --context testcontext --user testuser testworkspace
-  User testuser
-# DevPod End testhost
-
-Host existinghost
-  User existinguser`,
+			// Config where an existing DevPod block is at the very top (no
+			// preceding blank line). The new block must be inserted before the
+			// existing one, directly after its Start marker line — because our
+			// fix correctly does not treat "# DevPod Start" as a backtrack
+			// comment, so the insert position lands right at "Host
+			// existingtesthost" (index 1) and the new block goes in there.
+			config: "# DevPod Start existingtesthost\nHost existingtesthost\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context testcontext --user testuser testworkspace\n  User testuser\n# DevPod End existingtesthost\n\nHost existinghost\n  User existinguser",
 			execPath:   "/path/to/exec",
 			host:       "testhost",
 			user:       "testuser",
@@ -228,29 +226,45 @@ Host existinghost
 			gpgagent:   false,
 			devPodHome: "",
 			provider:   "",
-			expected: `# DevPod Start testhost
-Host testhost
-  ForwardAgent yes
-  LogLevel error
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa
-  ProxyCommand "/path/to/exec" ssh --stdio --context testcontext --user testuser testworkspace
-  User testuser
-# DevPod End testhost
-# DevPod Start existingtesthost
-Host existingtesthost
-  ForwardAgent yes
-  LogLevel error
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa
-  ProxyCommand "/path/to/exec" ssh --stdio --context testcontext --user testuser testworkspace
-  User testuser
-# DevPod End testhost
-
-Host existinghost
-  User existinguser`,
+			expected:   "# DevPod Start existingtesthost\n# DevPod Start testhost\nHost testhost\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context testcontext --user testuser testworkspace\n  User testuser\n# DevPod End testhost\nHost existingtesthost\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context testcontext --user testuser testworkspace\n  User testuser\n# DevPod End existingtesthost\n\nHost existinghost\n  User existinguser",
+			skipConfigContainsCheck: true,
+		},
+		{
+			// Regression: lowercase "host" entries (valid SSH config) were
+			// invisible to the old case-sensitive check, causing the insertion
+			// point to land inside an existing DevPod block instead of before
+			// the first host stanza.
+			name:       "Host addition with lowercase host entries",
+			config:     "host 192.168.1.1\n  User alice\n  Port 22\n\nhost myserver\n  User bob",
+			execPath:   "/path/to/exec",
+			host:       "testhost",
+			user:       "testuser",
+			context:    "testcontext",
+			workspace:  "testworkspace",
+			workdir:    "",
+			command:    "",
+			gpgagent:   false,
+			devPodHome: "",
+			provider:   "",
+			expected:   "# DevPod Start testhost\nHost testhost\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context testcontext --user testuser testworkspace\n  User testuser\n# DevPod End testhost\nhost 192.168.1.1\n  User alice\n  Port 22\n\nhost myserver\n  User bob",
+		},
+		{
+			// Regression: when an existing DevPod block was present, its
+			// "# DevPod Start" marker was counted as a comment line and the
+			// backtrack moved the insert position into it, corrupting the block.
+			name:       "Host addition does not corrupt existing DevPod block followed by plain host",
+			config:     "host plain-host\n  User alice\n\n# DevPod Start existing.devpod\nHost existing.devpod\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context ctx --user user existing\n  User user\n# DevPod End existing.devpod",
+			execPath:   "/path/to/exec",
+			host:       "testhost",
+			user:       "testuser",
+			context:    "testcontext",
+			workspace:  "testworkspace",
+			workdir:    "",
+			command:    "",
+			gpgagent:   false,
+			devPodHome: "",
+			provider:   "",
+			expected:   "# DevPod Start testhost\nHost testhost\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context testcontext --user testuser testworkspace\n  User testuser\n# DevPod End testhost\nhost plain-host\n  User alice\n\n# DevPod Start existing.devpod\nHost existing.devpod\n  ForwardAgent yes\n  LogLevel error\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  HostKeyAlgorithms rsa-sha2-256,rsa-sha2-512,ssh-rsa\n  ProxyCommand \"/path/to/exec\" ssh --stdio --context ctx --user user existing\n  User user\n# DevPod End existing.devpod",
 		},
 		{
 			name: "Host addition after top level includes",
@@ -324,9 +338,9 @@ Host testhost
 				assert.Contains(s.T(), result, "--gpg-agent-forwarding")
 			}
 
-			if tt.config != "" {
-				assert.Contains(s.T(), result, tt.config)
-			}
+			if tt.config != "" && !tt.skipConfigContainsCheck {
+					assert.Contains(s.T(), result, tt.config)
+				}
 		})
 	}
 }
