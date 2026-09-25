@@ -219,13 +219,27 @@ func buildSSHConfigLines(params addHostParams, proxyCmd string) []string {
 		build()
 }
 
+func sshConfigKeyword(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+
+	if index := strings.IndexAny(trimmed, " \t="); index >= 0 {
+		return trimmed[:index]
+	}
+
+	return trimmed
+}
+
+func isSSHSectionStart(line string) bool {
+	keyword := sshConfigKeyword(line)
+
+	return strings.EqualFold(keyword, "host") ||
+		strings.EqualFold(keyword, "match")
+}
+
 // findInsertPosition finds where to insert new SSH config entry.
-//
-// The new block is inserted just before the first Host stanza (case-insensitive,
-// matching SSH config semantics). Any plain comment lines immediately preceding
-// that stanza are included in the backtrack so the block lands before the
-// comments too — but "# DevPod Start/End" marker lines are never treated as
-// backtrack candidates, because they belong to the previous block.
 func findInsertPosition(config string) (int, []string, error) {
 	lineNumber := 0
 	found := false
@@ -237,22 +251,12 @@ func findInsertPosition(config string) (int, []string, error) {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
-		// Case-insensitive match for "host " or exactly "host" — mirrors SSH
-		// config semantics where the keyword is case-insensitive.
-		isHostLine := strings.EqualFold(trimmed, "host") ||
-			strings.HasPrefix(strings.ToLower(trimmed), "host ")
-
-		if isHostLine && !found {
+		if isSSHSectionStart(line) && !found {
 			found = true
 			lineNumber = max(lineNumber-commentLines, 0)
 		}
 
-		// Count consecutive plain comment lines, but do NOT count DevPod
-		// marker lines — they are part of the preceding block and must not
-		// cause the insert position to back up into it.
-		isDevPodMarker := strings.HasPrefix(trimmed, MarkerStartPrefix) ||
-			strings.HasPrefix(trimmed, MarkerEndPrefix)
-		if strings.HasPrefix(trimmed, "#") && !isDevPodMarker {
+		if strings.HasPrefix(trimmed, "#") {
 			commentLines++
 		} else {
 			commentLines = 0
